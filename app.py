@@ -166,10 +166,13 @@ with st.sidebar:
     st.header("⚙️ Configuração")
 
     # Tenta carregar credenciais dos Secrets (Streamlit Cloud)
-    _sec = st.secrets.get("clinicorp", {})
-    _sub_secret = _sec.get("subscriber_id", "")
-    _aid_secret = _sec.get("access_id", "")
-    _tok_secret = _sec.get("token", "")
+    try:
+        _sec = st.secrets.get("clinicorp", {})
+        _sub_secret = _sec.get("subscriber_id", "")
+        _aid_secret = _sec.get("access_id", "")
+        _tok_secret = _sec.get("token", "")
+    except Exception:
+        _sub_secret = _aid_secret = _tok_secret = ""
 
     if _sub_secret and _aid_secret and _tok_secret:
         sub = _sub_secret
