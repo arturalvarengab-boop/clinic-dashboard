@@ -168,11 +168,23 @@ def build_evals_by_prof(records):
 with st.sidebar:
     st.header("⚙️ Configuração")
 
-    with st.expander("🔑 Credenciais Clinicorp", expanded=True):
-        st.caption("Obtenha em: **Gerenciar Assinatura → Acesso Externo e Integrações**")
-        sub = st.text_input("Subscriber ID", type="password")
-        aid = st.text_input("Usuário API (Access ID)", type="password")
-        tok = st.text_input("Token API", type="password")
+    # Tenta carregar credenciais dos Secrets (Streamlit Cloud)
+    _sec = st.secrets.get("clinicorp", {})
+    _sub_secret = _sec.get("subscriber_id", "")
+    _aid_secret = _sec.get("access_id", "")
+    _tok_secret = _sec.get("token", "")
+
+    if _sub_secret and _aid_secret and _tok_secret:
+        sub = _sub_secret
+        aid = _aid_secret
+        tok = _tok_secret
+        st.success("🔒 Credenciais carregadas automaticamente.")
+    else:
+        with st.expander("🔑 Credenciais Clinicorp", expanded=True):
+            st.caption("Obtenha em: **Gerenciar Assinatura → Acesso Externo e Integrações**")
+            sub = st.text_input("Subscriber ID", type="password")
+            aid = st.text_input("Usuário API (Access ID)", type="password")
+            tok = st.text_input("Token API", type="password")
 
     st.divider()
 
