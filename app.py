@@ -47,18 +47,15 @@ def _get(endpoint: str, params: dict, access_id: str, token: str):
     url = f"{BASE_URL}{endpoint}"
     try:
         r = requests.get(url, params=params, headers=_auth(access_id, token), timeout=15)
-        r.raise_for_status()
+        if not r.ok:
+            if r.status_code == 401:
+                return None, "Credenciais inválidas (401). Verifique Subscriber ID, Usuário API e Token."
+            return None, f"Erro {r.status_code} na API: {r.text[:300]}"
         return r.json(), None
-    except requests.HTTPError as e:
-        code = e.response.status_code if e.response else "?"
-        body = e.response.text[:300] if e.response else ""
-        if code == 401:
-            return None, "401 — Credenciais inválidas. Verifique Subscriber ID, Usuário API e Token."
-        return None, f"HTTP {code} em {url}\n{body}"
     except requests.ConnectionError as e:
-        return None, f"Sem conexão com {url}\nDetalhe: {e}"
+        return None, f"Sem conexão com a API: {e}"
     except requests.Timeout:
-        return None, f"Timeout ao chamar {url}"
+        return None, "Timeout: a API demorou muito para responder."
     except Exception as e:
         return None, f"{type(e).__name__}: {e}"
 
