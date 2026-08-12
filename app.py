@@ -182,9 +182,9 @@ with st.sidebar:
     else:
         with st.expander("🔑 Credenciais Clinicorp", expanded=True):
             st.caption("Obtenha em: **Gerenciar Assinatura → Acesso Externo e Integrações**")
-            sub = st.text_input("Subscriber ID", type="password")
-            aid = st.text_input("Usuário API (Access ID)", type="password")
-            tok = st.text_input("Token API", type="password")
+            aid = st.text_input("Usuário API", type="password")
+            tok = st.text_input("Token API (cole o valor completo)", type="password")
+            sub = aid  # Subscriber ID = Usuário API
 
     st.divider()
 
@@ -209,7 +209,7 @@ with st.sidebar:
 
 
 # ── GATE ────────────────────────────────────────────────────────────────────────
-if not (sub and aid and tok):
+if not (aid and tok):
     st.title("Dashboard da Clínica")
     st.info("👈 Insira suas credenciais do Clinicorp na barra lateral para começar.")
     with st.expander("Como obter as credenciais?"):
