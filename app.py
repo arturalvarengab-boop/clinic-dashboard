@@ -153,8 +153,8 @@ with st.sidebar:
     today = date.today()
     st.subheader(f"Meta — {today.strftime('%B/%Y')}")
     meta = st.number_input(
-        "Faturamento esperado (R$)",
-        min_value=0.0, value=50_000.0, step=1_000.0,
+        "Meta de faturamento (orçamentos aprovados)",
+        min_value=0.0, value=220_000.0, step=1_000.0,
         format="%.2f", label_visibility="collapsed",
     )
 
@@ -199,8 +199,9 @@ if bid_err and not bid:
     st.stop()
 
 with st.spinner(f"Buscando dados de {bname}..."):
-    rev, rev_err = fetch_revenue(sub, aid, tok, bid, first, today)
+    recebido, rev_err   = fetch_revenue(sub, aid, tok, bid, first, today)
     appts_list, apt_err = fetch_appt_list(sub, aid, tok, bid, first, today)
+    estimates_mes, _    = fetch_estimates(sub, aid, tok, bid, first, today)
 
 err = rev_err or apt_err
 if err:
@@ -208,15 +209,32 @@ if err:
     st.stop()
 
 appts = len(appts_list)
-ticket = rev / appts if appts else 0.0
-pct = (rev / meta * 100) if meta else 0.0
-daily_avg = rev / elapsed if elapsed else 0.0
-proj = rev + daily_avg * remaining
+
+# Faturamento = orçamentos aprovados no mês
+fat_approved = [e for e in estimates_mes if e.get("Status") == "APPROVED"]
+fat = sum(float(e.get("Amount") or 0) for e in fat_approved)
+total_evals_mes = len(estimates_mes)
+approved_evals_mes = len(fat_approved)
+
+# Recebido dos orçamentos aprovados (PaymentAccounted = "X" nas procedures)
+recebido_fat = 0.0
+for e in fat_approved:
+    for proc in e.get("ProcedureList", []):
+        if proc.get("PaymentAccounted") == "X":
+            recebido_fat += float(proc.get("FinalAmount") or proc.get("Amount") or 0)
+
+# A receber = aprovado - recebido
+a_receber = fat - recebido_fat
+
+ticket = fat / approved_evals_mes if approved_evals_mes else 0.0
+pct = (fat / meta * 100) if meta else 0.0
+daily_avg = fat / elapsed if elapsed else 0.0
+proj = fat + daily_avg * remaining
 
 if debug_mode:
     with st.expander("🛠️ Debug", expanded=True):
         st.write(f"business_id: `{bid}` | business_name: `{bname}`")
-        st.write(f"Receita (cash_flow.in): `{rev}` | Agendamentos: `{appts}`")
+        st.write(f"Faturamento (orç. aprovados): `{fat}` | Recebido (cash_flow): `{recebido}` | Atendimentos: `{appts}`")
 
 
 # ── HEADER ──────────────────────────────────────────────────────────────────────
@@ -238,11 +256,51 @@ page_overview, page_prof = st.tabs(["📊 Visão Geral", "👨‍⚕️ Profissi
 with page_overview:
 
     # KPI Cards
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("💰 Faturamento Atual", fmt_brl(rev))
-    c2.metric("🎯 Meta do Mês", fmt_brl(meta))
-    c3.metric("👥 Atendimentos", f"{appts:,}")
-    c4.metric("🎟️ Ticket Médio", fmt_brl(ticket))
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("💰 Orçamentos Aprovados", fmt_brl(fat))
+    c2.metric("🏦 Recebido dos Orçamentos", fmt_brl(recebido_fat))
+    c3.metric("🎯 Meta do Mês", fmt_brl(meta))
+    c4.metric("👥 Atendimentos", f"{appts:,}")
+    c5.metric("🎟️ Ticket Médio", fmt_brl(ticket))
+
+    # Comparativo Aprovado x Recebido
+    st.markdown("---")
+    st.subheader("📊 Orçamentos Aprovados vs Recebido")
+
+    col_comp, col_info = st.columns([3, 1])
+    with col_comp:
+        fig_comp = go.Figure()
+        fig_comp.add_trace(go.Bar(
+            name="Aprovado", x=["Mês atual"],
+            y=[fat], marker_color="#2E86AB",
+            text=[fmt_brl(fat)], textposition="outside",
+        ))
+        fig_comp.add_trace(go.Bar(
+            name="Recebido", x=["Mês atual"],
+            y=[recebido_fat], marker_color="#4CAF50",
+            text=[fmt_brl(recebido_fat)], textposition="outside",
+        ))
+        fig_comp.add_trace(go.Bar(
+            name="A Receber", x=["Mês atual"],
+            y=[a_receber], marker_color="#FFB74D",
+            text=[fmt_brl(a_receber)], textposition="outside",
+        ))
+        fig_comp.add_hline(y=meta, line_dash="dot", line_color="#FF6B6B",
+                           annotation_text=f"Meta: {fmt_brl(meta)}")
+        fig_comp.update_layout(
+            height=320, barmode="group",
+            margin=dict(l=0, r=0, t=30, b=0),
+            yaxis=dict(tickprefix="R$ ", tickformat=",.0f"),
+            legend=dict(orientation="h", y=1.1),
+        )
+        st.plotly_chart(fig_comp, use_container_width=True)
+
+    with col_info:
+        receb_pct = (recebido_fat / fat * 100) if fat else 0
+        st.metric("% Recebido", f"{receb_pct:.1f}%")
+        st.metric("A Receber", fmt_brl(a_receber))
+        st.metric("vs Meta", fmt_brl(fat - meta),
+                  delta_color="normal" if fat >= meta else "inverse")
 
     # Barra de progresso
     st.markdown("---")
@@ -264,18 +322,26 @@ with page_overview:
     st.markdown("---")
     st.subheader("📈 Evolução Diária do Faturamento")
 
-    with st.spinner("Calculando evolução diária..."):
-        daily_dict = fetch_daily_receipts(sub, aid, tok, bid, first, today)
-
+    # Evolução diária com base nos orçamentos aprovados por data
     all_days = pd.date_range(first, today, freq="D")
     n_days = len(all_days)
+    daily_note = ""
 
-    if daily_dict:
-        actuals = [float(daily_dict.get(d.date(), 0) or 0) for d in all_days]
-        daily_note = ""
+    if fat_approved:
+        df_fat_daily = pd.DataFrame(fat_approved)
+        df_fat_daily["_date"] = pd.to_datetime(
+            df_fat_daily.get("SearchDate", df_fat_daily.get("Date")), errors="coerce"
+        ).dt.date
+        df_fat_daily["Amount"] = pd.to_numeric(df_fat_daily["Amount"], errors="coerce").fillna(0)
+        daily_sum = df_fat_daily.groupby("_date")["Amount"].sum()
+        cumulative = 0.0
+        actuals = []
+        for d in all_days:
+            cumulative += float(daily_sum.get(d.date(), 0))
+            actuals.append(cumulative)
     else:
-        actuals = [rev * (i / n_days) for i in range(1, n_days + 1)]
-        daily_note = "Evolução estimada linearmente com base no total acumulado."
+        actuals = [fat * (i / n_days) for i in range(1, n_days + 1)]
+        daily_note = "Evolução estimada linearmente com base no total aprovado."
 
     full_month = pd.date_range(first, date(today.year, today.month, dim), freq="D")
     targets = [(meta / dim) * i for i in range(1, dim + 1)]
@@ -312,14 +378,18 @@ with page_overview:
     with st.spinner("Carregando histórico dos últimos 6 meses..."):
         for i in range(5, 0, -1):
             s, e = nth_month_back(today, i)
-            r, _ = fetch_revenue(sub, aid, tok, bid, s, e)
-            al, _ = fetch_appt_list(sub, aid, tok, bid, s, e)
+            ests, _ = fetch_estimates(sub, aid, tok, bid, s, e)
+            al, _   = fetch_appt_list(sub, aid, tok, bid, s, e)
+            fat_hist = sum(float(x.get("Amount") or 0) for x in ests if x.get("Status") == "APPROVED")
+            rec_hist, _ = fetch_revenue(sub, aid, tok, bid, s, e)
             a = len(al)
-            rows.append({"Mês": s.strftime("%b/%y"), "Faturamento": r,
-                         "Atendimentos": a, "Ticket": r / a if a else 0.0,
+            rows.append({"Mês": s.strftime("%b/%y"), "Faturamento": fat_hist,
+                         "Recebido": rec_hist, "Atendimentos": a,
+                         "Ticket": fat_hist / len([x for x in ests if x.get("Status") == "APPROVED"]) if any(x.get("Status") == "APPROVED" for x in ests) else 0.0,
                          "atual": False})
-        rows.append({"Mês": today.strftime("%b/%y"), "Faturamento": rev,
-                     "Atendimentos": appts, "Ticket": ticket, "atual": True})
+        rows.append({"Mês": today.strftime("%b/%y"), "Faturamento": fat,
+                     "Recebido": recebido, "Atendimentos": appts,
+                     "Ticket": ticket, "atual": True})
 
     df_m = pd.DataFrame(rows)
     bar_colors = ["#FF6B6B" if r["atual"] else "#2E86AB" for _, r in df_m.iterrows()]
@@ -327,14 +397,23 @@ with page_overview:
     tab_f, tab_a, tab_t = st.tabs(["💰 Faturamento", "👥 Atendimentos", "🎟️ Ticket Médio"])
 
     with tab_f:
-        bf = go.Figure(go.Bar(
-            x=df_m["Mês"], y=df_m["Faturamento"], marker_color=bar_colors,
+        bf = go.Figure()
+        bf.add_trace(go.Bar(
+            name="Aprovado", x=df_m["Mês"], y=df_m["Faturamento"],
+            marker_color=bar_colors,
             text=[fmt_brl(v) for v in df_m["Faturamento"]], textposition="outside",
+        ))
+        bf.add_trace(go.Bar(
+            name="Recebido", x=df_m["Mês"], y=df_m["Recebido"],
+            marker_color=["#FF6B6B" if r["atual"] else "#94C9E8" for _, r in df_m.iterrows()],
+            text=[fmt_brl(v) for v in df_m["Recebido"]], textposition="outside",
         ))
         bf.add_hline(y=meta, line_dash="dot", line_color="#FF6B6B",
                      annotation_text=f"Meta: {fmt_brl(meta)}", annotation_position="top left")
-        bf.update_layout(height=300, margin=dict(l=0, r=0, t=30, b=0),
-                         yaxis=dict(tickprefix="R$ ", tickformat=",.0f"))
+        bf.update_layout(height=320, margin=dict(l=0, r=0, t=30, b=0),
+                         barmode="group",
+                         yaxis=dict(tickprefix="R$ ", tickformat=",.0f"),
+                         legend=dict(orientation="h", y=1.1))
         st.plotly_chart(bf, use_container_width=True)
 
     with tab_a:
