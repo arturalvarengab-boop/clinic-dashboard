@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from datetime import date
 import base64
 import calendar
+import math
 
 # ── PAGE CONFIG ────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -226,6 +227,7 @@ ticket = fat / approved_evals_mes if approved_evals_mes else 0.0
 pct = (fat / meta * 100) if meta else 0.0
 daily_avg = fat / elapsed if elapsed else 0.0
 proj = fat + daily_avg * remaining
+conv_rate_mes = (approved_evals_mes / total_evals_mes * 100) if total_evals_mes else 0.0
 
 if debug_mode:
     with st.expander("🛠️ Debug", expanded=True):
@@ -313,6 +315,100 @@ with page_overview:
         st.progress(min(pct / 100, 1.0))
     with col_proj:
         st.metric("Projeção do Mês", fmt_brl(proj), help="Baseada na média diária atual")
+
+    # ── INSIGHTS COMERCIAIS ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("💡 Insights Comerciais")
+
+    receb_pct_ins = (recebido_fat / fat * 100) if fat else 0.0
+    remaining_to_goal = max(0.0, meta - fat)
+    approvals_needed = math.ceil(remaining_to_goal / ticket) if ticket > 0 and remaining_to_goal > 0 else 0
+    evals_needed = math.ceil(approvals_needed / (conv_rate_mes / 100)) if conv_rate_mes > 0 and approvals_needed > 0 else 0
+    daily_evals_needed = math.ceil(evals_needed / remaining) if remaining > 0 and evals_needed > 0 else 0
+    daily_evals_pace = total_evals_mes / elapsed if elapsed > 0 else 0.0
+
+    ins1, ins2, ins3 = st.columns(3)
+
+    with ins1:
+        if fat == 0:
+            st.error("**🔴 Nenhum orçamento aprovado**  \nSem aprovações no mês ainda.")
+        elif receb_pct_ins >= 80:
+            st.success(
+                f"**✅ {receb_pct_ins:.1f}% do aprovado já recebido**  \n"
+                f"Caixa saudável! Faltam apenas {fmt_brl(fat - recebido_fat)}."
+            )
+        elif receb_pct_ins >= 50:
+            st.warning(
+                f"**⚠️ {receb_pct_ins:.1f}% do aprovado recebido**  \n"
+                f"Ainda há {fmt_brl(fat - recebido_fat)} a receber dos aprovados."
+            )
+        else:
+            st.error(
+                f"**🔴 Só {receb_pct_ins:.1f}% do aprovado foi recebido**  \n"
+                f"{fmt_brl(fat - recebido_fat)} ainda não entraram no caixa. Reforce a cobrança!"
+            )
+
+    with ins2:
+        if total_evals_mes == 0:
+            st.error("**🔴 Nenhuma avaliação no mês**  \nSem avaliações registradas. Isso é um gargalo crítico!")
+        elif conv_rate_mes >= 70:
+            st.success(
+                f"**✅ Conversão: {conv_rate_mes:.1f}%**  \n"
+                f"{approved_evals_mes} de {total_evals_mes} avaliações aprovadas. Ótimo!"
+            )
+        elif conv_rate_mes >= 50:
+            st.warning(
+                f"**⚠️ Conversão: {conv_rate_mes:.1f}%**  \n"
+                f"{approved_evals_mes} de {total_evals_mes} avaliações aprovadas. Há espaço para melhorar."
+            )
+        else:
+            st.error(
+                f"**🔴 Conversão baixa: {conv_rate_mes:.1f}%**  \n"
+                f"Só {approved_evals_mes} de {total_evals_mes} converteram. Revise o processo comercial!"
+            )
+
+    with ins3:
+        if fat >= meta:
+            st.success(
+                f"**✅ Meta atingida!**  \n"
+                f"Superou em {fmt_brl(fat - meta)}. Continue o ritmo!"
+            )
+        elif remaining <= 0:
+            st.error(f"**🔴 Mês encerrado sem bater a meta**  \nFaltaram {fmt_brl(remaining_to_goal)}.")
+        elif daily_evals_pace >= daily_evals_needed and daily_evals_needed > 0:
+            st.success(
+                f"**✅ Ritmo OK: {daily_evals_pace:.1f} aval./dia**  \n"
+                f"No ritmo certo! Meta ao alcance."
+            )
+        elif daily_evals_needed > 0:
+            st.error(
+                f"**🔴 Ritmo insuficiente: {daily_evals_pace:.1f} aval./dia**  \n"
+                f"Precisa de {daily_evals_needed} aval./dia para bater a meta."
+            )
+        else:
+            st.info(
+                f"**📋 Ritmo atual: {daily_evals_pace:.1f} aval./dia**  \n"
+                f"Defina uma meta para calcular o ritmo necessário."
+            )
+
+    if remaining_to_goal > 0 and remaining > 0:
+        st.markdown("#### 🎯 O que precisa acontecer para bater a meta?")
+        mp1, mp2, mp3, mp4 = st.columns(4)
+        mp1.metric("Falta para a meta", fmt_brl(remaining_to_goal))
+        mp2.metric("Aprovações necessárias", str(approvals_needed),
+                   help=f"Com ticket médio de {fmt_brl(ticket)}")
+        mp3.metric("Avaliações necessárias", str(evals_needed),
+                   help=f"Com taxa de conversão de {conv_rate_mes:.1f}%")
+        mp4.metric("Avaliações por dia", str(daily_evals_needed),
+                   help=f"Para os {remaining} dias restantes do mês")
+        if evals_needed > 0:
+            st.info(
+                f"Com ticket médio de **{fmt_brl(ticket)}** e conversão de **{conv_rate_mes:.1f}%**, "
+                f"você precisa de **{evals_needed} avaliações** nos próximos **{remaining} dias** "
+                f"(~{daily_evals_needed}/dia) para atingir a meta de **{fmt_brl(meta)}**."
+            )
+    elif fat >= meta:
+        st.success(f"🎉 Meta atingida! Você superou em **{fmt_brl(fat - meta)}**.")
 
     # Evolução diária
     st.markdown("---")
