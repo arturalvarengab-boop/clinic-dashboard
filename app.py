@@ -35,7 +35,6 @@ def nth_month_back(base, n):
 
 
 def find_col(df, keywords):
-    """Encontra primeira coluna cujo nome contém alguma das keywords."""
     return next(
         (c for c in df.columns if any(k in c.lower() for k in keywords)), None
     )
@@ -49,8 +48,8 @@ def _get(endpoint: str, params: dict, access_id: str, token: str):
         r = requests.get(url, params=params, headers=_auth(access_id, token), timeout=15)
         if not r.ok:
             if r.status_code == 401:
-                return None, "Credenciais inválidas (401). Verifique Subscriber ID, Usuário API e Token."
-            return None, f"Erro {r.status_code} na API: {r.text[:300]}"
+                return None, "Credenciais inválidas (401). Verifique Usuário API e Token."
+            return None, f"Erro {r.status_code}: {r.text[:200]}"
         return r.json(), None
     except requests.ConnectionError as e:
         return None, f"Sem conexão com a API: {e}"
@@ -60,31 +59,58 @@ def _get(endpoint: str, params: dict, access_id: str, token: str):
         return None, f"{type(e).__name__}: {e}"
 
 
-def fetch_analytics_raw(sub, aid, tok, from_d, to_d):
-    """Retorna lista bruta de items de analytics (uma entrada por unidade/clínica)."""
+def fetch_business(sub, aid, tok):
+    """Retorna (business_id, business_name, error)."""
+    data, err = _get("/business/list", {"subscriber_id": sub}, aid, tok)
+    if data and isinstance(data, list) and data:
+        return str(data[0].get("id", "")), data[0].get("BusinessName", "Clínica"), None
+    return "", "", err or "Nenhuma clínica encontrada."
+
+
+def fetch_revenue(sub, aid, tok, bid, from_d, to_d):
+    """Faturamento (receitas) do período via list_cash_flow."""
     data, err = _get(
-        "/analytics/list_results",
-        {"subscriber_id": sub, "from": from_d.isoformat(), "to": to_d.isoformat()},
+        "/financial/list_cash_flow",
+        {"subscriber_id": sub, "from": from_d.isoformat(),
+         "to": to_d.isoformat(), "business_id": bid},
         aid, tok,
     )
     if data is None:
+        return 0.0, err
+    items = data if isinstance(data, list) else [data]
+    return sum(float(x.get("in") or 0) for x in items), None
+
+
+def fetch_appt_list(sub, aid, tok, bid, from_d, to_d):
+    """Lista de agendamentos do período."""
+    data, err = _get(
+        "/appointment/list",
+        {"subscriber_id": sub, "from": from_d.isoformat(),
+         "to": to_d.isoformat(), "businessId": bid},
+        aid, tok,
+    )
+    if not data or not isinstance(data, list):
         return [], err
-    return data if isinstance(data, list) else [data], None
+    return [a for a in data if not a.get("Deleted")], None
 
 
-def fetch_analytics(sub, aid, tok, from_d, to_d):
-    items, err = fetch_analytics_raw(sub, aid, tok, from_d, to_d)
-    if not items:
-        return 0.0, 0, err
-    rev = sum(float(x.get("TotalRevenueAmount") or 0) for x in items)
-    appts = sum(int(x.get("AppointmentsTotal") or 0) for x in items)
-    return rev, appts, None
+def fetch_estimates(sub, aid, tok, bid, from_d, to_d):
+    """Lista de orçamentos/avaliações do período."""
+    data, err = _get(
+        "/estimates/list",
+        {"subscriber_id": sub, "from": from_d.isoformat(),
+         "to": to_d.isoformat(), "business_id": bid},
+        aid, tok,
+    )
+    return (data if isinstance(data, list) else []), err
 
 
-def fetch_daily_receipts(sub, aid, tok, from_d, to_d):
+def fetch_daily_receipts(sub, aid, tok, bid, from_d, to_d):
+    """Tenta obter receitas diárias acumuladas. Retorna {date: cumul} ou None."""
     data, _ = _get(
         "/financial/list_receipt",
-        {"subscriber_id": sub, "from": from_d.isoformat(), "to": to_d.isoformat()},
+        {"subscriber_id": sub, "from": from_d.isoformat(),
+         "to": to_d.isoformat(), "business_id": bid},
         aid, tok,
     )
     if not data or not isinstance(data, list):
@@ -99,92 +125,28 @@ def fetch_daily_receipts(sub, aid, tok, from_d, to_d):
     return df.groupby(date_col)[val_col].sum().sort_index().cumsum().to_dict()
 
 
-def fetch_payments(sub, aid, tok, from_d, to_d):
-    data, err = _get(
-        "/financial/list_payments",
-        {"subscriber_id": sub, "from": from_d.isoformat(), "to": to_d.isoformat()},
-        aid, tok,
-    )
-    return (data if isinstance(data, list) else []), err
-
-
-def fetch_estimates_list(sub, aid, tok, from_d, to_d):
-    data, err = _get(
-        "/estimates/list",
-        {"subscriber_id": sub, "from": from_d.isoformat(), "to": to_d.isoformat()},
-        aid, tok,
-    )
-    return (data if isinstance(data, list) else []), err
-
-
-def build_revenue_by_prof(records):
-    """
-    Agrupa registros por profissional somando receita.
-    Retorna DataFrame [Profissional, Receita, Qtd, Ticket Médio] ordenado desc,
-    ou None se não encontrar colunas de profissional/valor.
-    """
-    if not records:
-        return None
-    df = pd.DataFrame(records)
-    PROF_KEYS = ("professional", "profissional", "doctor", "dentist", "medico")
-    VAL_KEYS = ("value", "amount", "total", "valor")
-    prof_col = find_col(df, PROF_KEYS)
-    val_col = find_col(df, VAL_KEYS)
-    if not prof_col or not val_col:
-        return None
-    df[val_col] = pd.to_numeric(df[val_col], errors="coerce").fillna(0)
-    df[prof_col] = df[prof_col].fillna("(sem profissional)").astype(str)
-    result = df.groupby(prof_col, as_index=False).agg(
-        Receita=(val_col, "sum"),
-        Qtd=(val_col, "count"),
-    )
-    result.rename(columns={prof_col: "Profissional"}, inplace=True)
-    result["Ticket Médio"] = result["Receita"] / result["Qtd"]
-    return result.sort_values("Receita", ascending=False)
-
-
-def build_evals_by_prof(records):
-    """
-    Conta avaliações (orçamentos) por profissional.
-    Retorna DataFrame [Profissional, Avaliações] ordenado desc, ou None.
-    """
-    if not records:
-        return None
-    df = pd.DataFrame(records)
-    PROF_KEYS = ("professional", "profissional", "doctor", "dentist", "medico")
-    prof_col = find_col(df, PROF_KEYS)
-    if not prof_col:
-        return None
-    df[prof_col] = df[prof_col].fillna("(sem profissional)").astype(str)
-    result = df.groupby(prof_col).size().reset_index(name="Avaliações")
-    result.rename(columns={prof_col: "Profissional"}, inplace=True)
-    return result.sort_values("Avaliações", ascending=False)
-
-
 # ── SIDEBAR ─────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙️ Configuração")
 
-    # Tenta carregar credenciais dos Secrets (Streamlit Cloud)
     try:
         _sec = st.secrets.get("clinicorp", {})
-        _sub_secret = _sec.get("subscriber_id", "")
         _aid_secret = _sec.get("access_id", "")
         _tok_secret = _sec.get("token", "")
     except Exception:
-        _sub_secret = _aid_secret = _tok_secret = ""
+        _aid_secret = _tok_secret = ""
 
-    if _sub_secret and _aid_secret and _tok_secret:
-        sub = _sub_secret
+    if _aid_secret and _tok_secret:
         aid = _aid_secret
         tok = _tok_secret
+        sub = aid
         st.success("🔒 Credenciais carregadas automaticamente.")
     else:
         with st.expander("🔑 Credenciais Clinicorp", expanded=True):
             st.caption("Obtenha em: **Gerenciar Assinatura → Acesso Externo e Integrações**")
             aid = st.text_input("Usuário API", type="password")
-            tok = st.text_input("Token API (cole o valor completo)", type="password")
-            sub = aid  # Subscriber ID = Usuário API
+            tok = st.text_input("Token API", type="password")
+            sub = aid
 
     st.divider()
 
@@ -217,8 +179,7 @@ if not (aid and tok):
 1. Acesse **sistema.clinicorp.com**
 2. Clique em **Gerenciar Assinatura**
 3. Acesse **Acesso Externo e Integrações**
-4. Copie o **Subscriber ID**, **Usuário API** e **Token API**
-5. Cole os valores nos campos da barra lateral
+4. Copie o **Usuário API** e o **Token API**
         """)
     st.stop()
 
@@ -230,31 +191,36 @@ elapsed = today.day
 remaining = dim - elapsed
 first = date(today.year, today.month, 1)
 
-with st.spinner("Buscando dados do Clinicorp..."):
-    raw_items, raw_err = fetch_analytics_raw(sub, aid, tok, first, today)
-    rev, appts, err = fetch_analytics(sub, aid, tok, first, today)
+with st.spinner("Conectando à API do Clinicorp..."):
+    bid, bname, bid_err = fetch_business(sub, aid, tok)
 
+if bid_err and not bid:
+    st.error(f"**Erro:** {bid_err}")
+    st.stop()
+
+with st.spinner(f"Buscando dados de {bname}..."):
+    rev, rev_err = fetch_revenue(sub, aid, tok, bid, first, today)
+    appts_list, apt_err = fetch_appt_list(sub, aid, tok, bid, first, today)
+
+err = rev_err or apt_err
 if err:
     st.error(f"**Erro na API:** {err}")
     st.stop()
 
-if debug_mode:
-    with st.expander("🛠️ Debug — resposta bruta da API /analytics/list_results", expanded=True):
-        if raw_err:
-            st.error(f"Erro: {raw_err}")
-        elif not raw_items:
-            st.warning("A API retornou lista vazia. Verifique o Subscriber ID e as datas.")
-        else:
-            st.json(raw_items)
-
+appts = len(appts_list)
 ticket = rev / appts if appts else 0.0
 pct = (rev / meta * 100) if meta else 0.0
 daily_avg = rev / elapsed if elapsed else 0.0
 proj = rev + daily_avg * remaining
 
+if debug_mode:
+    with st.expander("🛠️ Debug", expanded=True):
+        st.write(f"business_id: `{bid}` | business_name: `{bname}`")
+        st.write(f"Receita (cash_flow.in): `{rev}` | Agendamentos: `{appts}`")
+
 
 # ── HEADER ──────────────────────────────────────────────────────────────────────
-st.title("Dashboard da Clínica")
+st.title(f"Dashboard — {bname}")
 st.markdown(
     f"**{first.strftime('%d/%m')} → {today.strftime('%d/%m/%Y')}**"
     f"&nbsp;|&nbsp; Dia **{elapsed}** de **{dim}**"
@@ -299,7 +265,7 @@ with page_overview:
     st.subheader("📈 Evolução Diária do Faturamento")
 
     with st.spinner("Calculando evolução diária..."):
-        daily_dict = fetch_daily_receipts(sub, aid, tok, first, today)
+        daily_dict = fetch_daily_receipts(sub, aid, tok, bid, first, today)
 
     all_days = pd.date_range(first, today, freq="D")
     n_days = len(all_days)
@@ -309,7 +275,7 @@ with page_overview:
         daily_note = ""
     else:
         actuals = [rev * (i / n_days) for i in range(1, n_days + 1)]
-        daily_note = "Evolução estimada linearmente — dados diários individuais não disponíveis via API de recibos."
+        daily_note = "Evolução estimada linearmente com base no total acumulado."
 
     full_month = pd.date_range(first, date(today.year, today.month, dim), freq="D")
     targets = [(meta / dim) * i for i in range(1, dim + 1)]
@@ -346,9 +312,12 @@ with page_overview:
     with st.spinner("Carregando histórico dos últimos 6 meses..."):
         for i in range(5, 0, -1):
             s, e = nth_month_back(today, i)
-            r, a, _ = fetch_analytics(sub, aid, tok, s, e)
+            r, _ = fetch_revenue(sub, aid, tok, bid, s, e)
+            al, _ = fetch_appt_list(sub, aid, tok, bid, s, e)
+            a = len(al)
             rows.append({"Mês": s.strftime("%b/%y"), "Faturamento": r,
-                         "Atendimentos": a, "Ticket": r / a if a else 0.0, "atual": False})
+                         "Atendimentos": a, "Ticket": r / a if a else 0.0,
+                         "atual": False})
         rows.append({"Mês": today.strftime("%b/%y"), "Faturamento": rev,
                      "Atendimentos": appts, "Ticket": ticket, "atual": True})
 
@@ -398,24 +367,26 @@ with page_overview:
 # ═══════════════════════════════════════════════════════════════════════════════
 with page_prof:
 
+    with st.spinner("Buscando avaliações e dados por profissional..."):
+        estimates, _ = fetch_estimates(sub, aid, tok, bid, first, today)
+
     # ── Avaliações do Mês ──────────────────────────────────────────────────────
     st.subheader("🔍 Avaliações do Mês")
 
-    items_raw, _ = fetch_analytics_raw(sub, aid, tok, first, today)
-    total_evals = sum(int(x.get("EstimatesTotalQuantity") or 0) for x in items_raw)
-    approved_evals = sum(int(x.get("EstimatesApprovedQuantity") or 0) for x in items_raw)
-    total_eval_amount = sum(float(x.get("EstimatesTotalAmount") or 0) for x in items_raw)
-    approved_eval_amount = sum(float(x.get("EstimatesApprovedAmount") or 0) for x in items_raw)
+    total_evals = len(estimates)
+    approved_evals = len([e for e in estimates if e.get("Status") == "APPROVED"])
+    approved_amount = sum(float(e.get("Amount") or 0) for e in estimates if e.get("Status") == "APPROVED")
+    total_amount = sum(float(e.get("Amount") or 0) for e in estimates)
     conv_rate = (approved_evals / total_evals * 100) if total_evals else 0.0
+    pending = total_evals - approved_evals
 
     ea1, ea2, ea3, ea4 = st.columns(4)
     ea1.metric("📋 Avaliações Feitas", f"{total_evals:,}")
     ea2.metric("✅ Aprovadas", f"{approved_evals:,}")
     ea3.metric("📈 Taxa de Conversão", f"{conv_rate:.1f}%")
-    ea4.metric("💵 Valor Aprovado", fmt_brl(approved_eval_amount))
+    ea4.metric("💵 Valor Aprovado", fmt_brl(approved_amount))
 
     if total_evals > 0:
-        pending = total_evals - approved_evals
         fig_funil = go.Figure(go.Funnel(
             y=["Avaliações Feitas", "Aprovadas"],
             x=[total_evals, approved_evals],
@@ -425,87 +396,74 @@ with page_prof:
         fig_funil.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0))
         st.plotly_chart(fig_funil, use_container_width=True)
         if pending > 0:
-            st.caption(f"ℹ️ {pending} avaliação(ões) ainda não aprovada(s) — valor em aberto: {fmt_brl(total_eval_amount - approved_eval_amount)}")
+            st.caption(
+                f"ℹ️ {pending} avaliação(ões) pendente(s) — "
+                f"valor em aberto: {fmt_brl(total_amount - approved_amount)}"
+            )
 
     # ── Desempenho por Profissional ────────────────────────────────────────────
     st.markdown("---")
     st.subheader("👨‍⚕️ Desempenho por Profissional")
 
-    with st.spinner("Buscando dados por profissional..."):
-        payments, pay_err = fetch_payments(sub, aid, tok, first, today)
-        estimates, _ = fetch_estimates_list(sub, aid, tok, first, today)
+    if estimates:
+        df_est = pd.DataFrame(estimates)
 
-    # Tenta montar tabela de receita por profissional — primeiro via pagamentos,
-    # depois via orçamentos como fallback
-    df_prof = build_revenue_by_prof(payments) or build_revenue_by_prof(estimates)
+        if "ProfessionalName" in df_est.columns and "Amount" in df_est.columns:
+            df_est["Amount"] = pd.to_numeric(df_est["Amount"], errors="coerce").fillna(0)
+            df_est["ProfessionalName"] = df_est["ProfessionalName"].fillna("(sem nome)")
 
-    if df_prof is not None and not df_prof.empty:
-        df_prof_asc = df_prof.sort_values("Receita", ascending=True)
-
-        tp1, tp2, tp3 = st.tabs(["💰 Receita por Profissional", "🎟️ Ticket Médio", "📋 Avaliações"])
-
-        with tp1:
-            fig_r = go.Figure(go.Bar(
-                x=df_prof_asc["Receita"],
-                y=df_prof_asc["Profissional"],
-                orientation="h",
-                marker_color="#2E86AB",
-                text=[fmt_brl(v) for v in df_prof_asc["Receita"]],
-                textposition="outside",
-            ))
-            fig_r.update_layout(
-                height=max(300, len(df_prof_asc) * 55),
-                margin=dict(l=0, r=120, t=10, b=0),
-                xaxis=dict(tickprefix="R$ ", tickformat=",.0f"),
+            df_prof = df_est.groupby("ProfessionalName", as_index=False).agg(
+                Avaliações=("id", "count"),
+                Valor_Total=("Amount", "sum"),
             )
-            st.plotly_chart(fig_r, use_container_width=True)
+            df_prof["Ticket Médio"] = df_prof["Valor_Total"] / df_prof["Avaliações"]
 
-        with tp2:
-            df_tkt = df_prof.sort_values("Ticket Médio", ascending=True)
-            fig_t = go.Figure(go.Bar(
-                x=df_tkt["Ticket Médio"],
-                y=df_tkt["Profissional"],
-                orientation="h",
-                marker_color="#4ECDC4",
-                text=[fmt_brl(v) for v in df_tkt["Ticket Médio"]],
-                textposition="outside",
-            ))
-            fig_t.update_layout(
-                height=max(300, len(df_tkt) * 55),
-                margin=dict(l=0, r=120, t=10, b=0),
-                xaxis=dict(tickprefix="R$ ", tickformat=",.0f"),
-            )
-            st.plotly_chart(fig_t, use_container_width=True)
+            tp1, tp2, tp3 = st.tabs(["💰 Valor por Profissional", "🎟️ Ticket Médio", "📋 Avaliações"])
 
-        with tp3:
-            df_evals_prof = build_evals_by_prof(estimates)
-            if df_evals_prof is not None and not df_evals_prof.empty:
-                df_evals_asc = df_evals_prof.sort_values("Avaliações", ascending=True)
-                fig_ev = go.Figure(go.Bar(
-                    x=df_evals_asc["Avaliações"],
-                    y=df_evals_asc["Profissional"],
-                    orientation="h",
-                    marker_color="#FF6B6B",
-                    text=df_evals_asc["Avaliações"],
+            with tp1:
+                df_r = df_prof.sort_values("Valor_Total", ascending=True)
+                fig_r = go.Figure(go.Bar(
+                    x=df_r["Valor_Total"], y=df_r["ProfessionalName"],
+                    orientation="h", marker_color="#2E86AB",
+                    text=[fmt_brl(v) for v in df_r["Valor_Total"]],
                     textposition="outside",
                 ))
+                fig_r.update_layout(
+                    height=max(300, len(df_r) * 55),
+                    margin=dict(l=0, r=120, t=10, b=0),
+                    xaxis=dict(tickprefix="R$ ", tickformat=",.0f"),
+                )
+                st.plotly_chart(fig_r, use_container_width=True)
+                st.caption("Valor baseado nos orçamentos emitidos no período.")
+
+            with tp2:
+                df_t = df_prof.sort_values("Ticket Médio", ascending=True)
+                fig_t = go.Figure(go.Bar(
+                    x=df_t["Ticket Médio"], y=df_t["ProfessionalName"],
+                    orientation="h", marker_color="#4ECDC4",
+                    text=[fmt_brl(v) for v in df_t["Ticket Médio"]],
+                    textposition="outside",
+                ))
+                fig_t.update_layout(
+                    height=max(300, len(df_t) * 55),
+                    margin=dict(l=0, r=120, t=10, b=0),
+                    xaxis=dict(tickprefix="R$ ", tickformat=",.0f"),
+                )
+                st.plotly_chart(fig_t, use_container_width=True)
+
+            with tp3:
+                df_ev = df_prof.sort_values("Avaliações", ascending=True)
+                fig_ev = go.Figure(go.Bar(
+                    x=df_ev["Avaliações"], y=df_ev["ProfessionalName"],
+                    orientation="h", marker_color="#FF6B6B",
+                    text=df_ev["Avaliações"], textposition="outside",
+                ))
                 fig_ev.update_layout(
-                    height=max(300, len(df_evals_asc) * 55),
+                    height=max(300, len(df_ev) * 55),
                     margin=dict(l=0, r=60, t=10, b=0),
                 )
                 st.plotly_chart(fig_ev, use_container_width=True)
-            else:
-                st.info(
-                    "Dados de avaliações por profissional não disponíveis via API de orçamentos.\n\n"
-                    "A lista de orçamentos pode não retornar o campo de profissional na sua "
-                    "assinatura do Clinicorp."
-                )
+        else:
+            st.info("Os orçamentos não retornaram dados de profissional.")
     else:
-        st.info(
-            "Não foi possível separar receita por profissional via API.\n\n"
-            "Os registros de pagamento ou orçamentos não incluíram o campo de profissional. "
-            "Entre em contato com o suporte do Clinicorp para verificar quais campos "
-            "estão disponíveis na API da sua assinatura."
-        )
-        if pay_err:
-            st.caption(f"Detalhe do erro: {pay_err}")
+        st.info("Nenhuma avaliação encontrada neste período.")
