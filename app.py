@@ -2,7 +2,7 @@ import streamlit as st
 import requests
 import pandas as pd
 import plotly.graph_objects as go
-from datetime import date
+from datetime import date, timedelta
 import base64
 import calendar
 import math
@@ -104,6 +104,25 @@ def fetch_estimates(sub, aid, tok, bid, from_d, to_d):
         aid, tok,
     )
     return (data if isinstance(data, list) else []), err
+
+
+@st.cache_data(ttl=300)
+def fetch_full_agenda_raw(sub, aid, tok, bid, from_d, to_d):
+    """Busca TODOS os agendamentos do mês incluindo cancelados (para análise de falta/cancelamento)."""
+    url = f"{BASE_URL}/appointment/list"
+    encoded = base64.b64encode(f"{sub}:{tok}".encode()).decode()
+    headers = {"Authorization": f"Basic {encoded}"}
+    try:
+        r = requests.get(url, params={
+            "subscriber_id": sub, "from": from_d.isoformat(),
+            "to": to_d.isoformat(), "businessId": bid
+        }, headers=headers, timeout=15)
+        if not r.ok:
+            return [], f"Erro {r.status_code}"
+        data = r.json()
+        return data if isinstance(data, list) else [], None
+    except Exception as e:
+        return [], str(e)
 
 
 def fetch_daily_receipts(sub, aid, tok, bid, from_d, to_d):
@@ -245,7 +264,7 @@ st.markdown(
 
 
 # ── ABAS PRINCIPAIS ──────────────────────────────────────────────────────────────
-page_overview, page_prof = st.tabs(["📊 Visão Geral", "👨‍⚕️ Profissionais"])
+page_overview, page_prof, page_agenda = st.tabs(["📊 Visão Geral", "👨‍⚕️ Profissionais", "📅 Agenda & Previsão"])
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -638,3 +657,226 @@ with page_prof:
             st.info("Os orçamentos não retornaram dados de profissional.")
     else:
         st.info("Nenhuma avaliação encontrada neste período.")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ABA 3 — AGENDA & PREVISÃO
+# ═══════════════════════════════════════════════════════════════════════════════
+with page_agenda:
+    st.title(f"📅 Agenda — {today.strftime('%B/%Y')}")
+
+    with st.spinner("Carregando agenda completa do mês..."):
+        last_day = date(today.year, today.month, dim)
+        all_appts_raw, agenda_err = fetch_full_agenda_raw(sub, aid, tok, bid, first, last_day)
+
+    if agenda_err and not all_appts_raw:
+        st.error(f"Erro ao carregar agenda: {agenda_err}")
+    else:
+        today_atomic = int(today.strftime("%Y%m%d"))
+
+        active_appts  = [a for a in all_appts_raw if not a.get("Deleted")]
+        cancelled_appts = [a for a in all_appts_raw if a.get("Deleted")]
+
+        past_active   = [a for a in active_appts if a.get("AtomicDate", 0) <= today_atomic]
+        future_active = [a for a in active_appts if a.get("AtomicDate", 0) > today_atomic]
+
+        new_patients  = [a for a in active_appts if a.get("isNew") not in ("", None, False, 0)]
+        ret_patients  = [a for a in active_appts if a.get("isNew") in ("", None, False, 0)]
+
+        past_pace     = len(past_active) / elapsed if elapsed else 0
+        future_pace   = len(future_active) / remaining if remaining else 0
+        cancel_rate   = (len(cancelled_appts) / len(all_appts_raw) * 100) if all_appts_raw else 0
+        new_pct       = (len(new_patients) / len(active_appts) * 100) if active_appts else 0
+
+        # ── KPIs ──────────────────────────────────────────────────────────────
+        ag1, ag2, ag3, ag4, ag5 = st.columns(5)
+        ag1.metric("📋 Total no mês",         len(active_appts))
+        ag2.metric(f"✅ Realizados (1–{elapsed})", len(past_active),
+                   help=f"Média: {past_pace:.1f}/dia")
+        ag3.metric(f"📅 Agendados ({elapsed+1}–{dim})", len(future_active),
+                   help=f"Média agendada: {future_pace:.1f}/dia")
+        ag4.metric("❌ Cancelamentos",         len(cancelled_appts),
+                   help=f"{cancel_rate:.1f}% do total de agendamentos do mês")
+        ag5.metric("🆕 Pacientes Novos",       len(new_patients),
+                   help=f"{new_pct:.1f}% dos atendimentos ativos")
+
+        # ── Alertas ───────────────────────────────────────────────────────────
+        st.markdown("---")
+        pal1, pal2, pal3 = st.columns(3)
+
+        with pal1:
+            if remaining > 0:
+                pace_drop_pct = ((past_pace - future_pace) / past_pace * 100) if past_pace > 0 else 0
+                if pace_drop_pct > 30:
+                    st.error(
+                        f"**🔴 2ª quinzena {pace_drop_pct:.0f}% mais vazia**  \n"
+                        f"Ritmo atual: **{past_pace:.1f}/dia** → Agendado: **{future_pace:.1f}/dia**.  \n"
+                        f"Preencha os horários urgente!"
+                    )
+                elif pace_drop_pct > 15:
+                    st.warning(
+                        f"**⚠️ Queda de ritmo: {pace_drop_pct:.0f}%**  \n"
+                        f"De {past_pace:.1f}/dia para {future_pace:.1f}/dia na 2ª quinzena."
+                    )
+                else:
+                    st.success(
+                        f"**✅ Agenda equilibrada**  \n"
+                        f"{past_pace:.1f}/dia realizados → {future_pace:.1f}/dia agendados."
+                    )
+            else:
+                st.info("Mês encerrado.")
+
+        with pal2:
+            if cancel_rate >= 20:
+                st.error(
+                    f"**🔴 Cancelamentos altos: {cancel_rate:.1f}%**  \n"
+                    f"{len(cancelled_appts)} cancelados no mês.  \n"
+                    f"Revise o processo de confirmação de consultas!"
+                )
+            elif cancel_rate >= 10:
+                st.warning(
+                    f"**⚠️ Cancelamentos: {cancel_rate:.1f}%**  \n"
+                    f"{len(cancelled_appts)} cancelados. Avalie envio de lembretes automáticos."
+                )
+            else:
+                st.success(
+                    f"**✅ Cancelamentos sob controle: {cancel_rate:.1f}%**  \n"
+                    f"Apenas {len(cancelled_appts)} cancelados no mês."
+                )
+
+        with pal3:
+            if new_pct >= 20:
+                st.success(
+                    f"**✅ Captação saudável: {new_pct:.1f}% novos**  \n"
+                    f"{len(new_patients)} novos pacientes no mês. Funil ativo!"
+                )
+            elif new_pct >= 10:
+                st.warning(
+                    f"**⚠️ Poucos pacientes novos: {new_pct:.1f}%**  \n"
+                    f"{len(new_patients)} novos no mês. Invista em captação."
+                )
+            else:
+                st.error(
+                    f"**🔴 Captação crítica: {new_pct:.1f}% novos**  \n"
+                    f"Quase sem novos pacientes — a base atual não sustenta crescimento!"
+                )
+
+        # ── Gráfico: agendamentos por dia ──────────────────────────────────────
+        st.markdown("---")
+        st.subheader("📊 Agendamentos por dia")
+
+        df_ag = pd.DataFrame(active_appts)
+        if not df_ag.empty and "AtomicDate" in df_ag.columns:
+            df_ag["data"] = pd.to_datetime(df_ag["AtomicDate"].astype(str), format="%Y%m%d").dt.date
+            df_ag["status"] = df_ag["AtomicDate"].apply(
+                lambda x: "Realizado" if x <= today_atomic else "Agendado"
+            )
+            dc = df_ag.groupby(["data", "status"]).size().reset_index(name="qtd")
+
+            fig_ag = go.Figure()
+            for status, color in [("Realizado", "#2E86AB"), ("Agendado", "#94C9E8")]:
+                ds = dc[dc["status"] == status]
+                fig_ag.add_trace(go.Bar(
+                    x=ds["data"], y=ds["qtd"], name=status,
+                    marker_color=color, text=ds["qtd"], textposition="outside",
+                ))
+            fig_ag.update_layout(
+                height=300, barmode="group",
+                margin=dict(l=0, r=0, t=10, b=0),
+                xaxis=dict(tickformat="%d/%m"),
+                legend=dict(orientation="h", y=1.1),
+            )
+            st.plotly_chart(fig_ag, use_container_width=True)
+
+        # ── Dias úteis com agenda fraca ────────────────────────────────────────
+        if remaining > 0:
+            weekday_pt = {0: "Seg", 1: "Ter", 2: "Qua", 3: "Qui", 4: "Sex"}
+            future_by_day = {}
+            d_iter = today + timedelta(days=1)
+            while d_iter <= last_day:
+                if d_iter.weekday() < 5:
+                    atomic = int(d_iter.strftime("%Y%m%d"))
+                    cnt = sum(1 for a in future_active if a.get("AtomicDate") == atomic)
+                    future_by_day[d_iter] = cnt
+                d_iter += timedelta(days=1)
+
+            light_days = [(d, c) for d, c in sorted(future_by_day.items()) if c < 5]
+            if light_days:
+                st.markdown("#### ⚠️ Dias úteis com agenda fraca (menos de 5 agendamentos)")
+                cols_ld = st.columns(min(len(light_days), 6))
+                for i, (d, c) in enumerate(light_days[:6]):
+                    label = f"{d.strftime('%d/%m')} ({weekday_pt.get(d.weekday(), '')})"
+                    cols_ld[i].metric(label, f"{c} agend." if c > 0 else "🔴 Vazio")
+
+        # ── Projeção de receita pela agenda ────────────────────────────────────
+        st.markdown("---")
+        st.subheader("💰 Projeção de Receita pela Agenda")
+
+        avg_rev_per_appt = fat / len(past_active) if past_active else 0
+        proj_agenda = fat + (avg_rev_per_appt * len(future_active))
+
+        pr1, pr2, pr3, pr4 = st.columns(4)
+        pr1.metric("Receita atual (aprovado)",  fmt_brl(fat))
+        pr2.metric("Receita média por atend.",  fmt_brl(avg_rev_per_appt),
+                   help="Orçamentos aprovados ÷ atendimentos realizados no mês")
+        pr3.metric("Agendamentos restantes",    len(future_active))
+        pr4.metric("Projeção pela agenda",      fmt_brl(proj_agenda),
+                   delta=fmt_brl(proj_agenda - meta),
+                   delta_color="normal" if proj_agenda >= meta else "inverse")
+
+        if proj_agenda >= meta:
+            st.success(
+                f"✅ Se os **{len(future_active)} agendamentos restantes** se mantiverem, "
+                f"a projeção é de **{fmt_brl(proj_agenda)}** — superando a meta em **{fmt_brl(proj_agenda - meta)}**."
+            )
+        else:
+            appts_faltam = math.ceil((meta - proj_agenda) / avg_rev_per_appt) if avg_rev_per_appt > 0 else 0
+            st.error(
+                f"🔴 Com a agenda atual, a projeção é **{fmt_brl(proj_agenda)}** — "
+                f"**{fmt_brl(meta - proj_agenda)}** abaixo da meta.  \n"
+                f"São necessários mais **{appts_faltam} atendimentos** para fechar a meta."
+            )
+
+        st.caption(
+            "⚠️ Projeção baseada na receita média por atendimento do mês atual. "
+            "Nem todo agendamento gera orçamento aprovado — use como referência, não como certeza."
+        )
+
+        # ── Por procedimento + Novos vs Retorno ───────────────────────────────
+        st.markdown("---")
+        col_cat2, col_np = st.columns(2)
+
+        with col_cat2:
+            st.markdown("#### Por procedimento (mês todo)")
+            if not df_ag.empty and "CategoryDescription" in df_ag.columns:
+                df_cat = df_ag.copy()
+                df_cat["cat"] = df_cat["CategoryDescription"].str.strip().replace("", "Sem categoria")
+                cats_df = df_cat[df_cat["cat"] != ""].groupby("cat").size().reset_index(name="qtd")
+                cats_df = cats_df.sort_values("qtd", ascending=True)
+                fig_cat2 = go.Figure(go.Bar(
+                    x=cats_df["qtd"], y=cats_df["cat"],
+                    orientation="h", marker_color="#4ECDC4",
+                    text=cats_df["qtd"], textposition="outside",
+                ))
+                fig_cat2.update_layout(
+                    height=max(300, len(cats_df) * 28),
+                    margin=dict(l=0, r=60, t=10, b=0),
+                )
+                st.plotly_chart(fig_cat2, use_container_width=True)
+
+        with col_np:
+            st.markdown("#### Novos pacientes vs Retorno")
+            if new_patients or ret_patients:
+                fig_np = go.Figure(go.Pie(
+                    labels=["Novos", "Retorno"],
+                    values=[len(new_patients), len(ret_patients)],
+                    marker=dict(colors=["#FF6B6B", "#2E86AB"]),
+                    hole=0.45,
+                    textinfo="label+percent+value",
+                ))
+                fig_np.update_layout(height=320, margin=dict(l=0, r=0, t=10, b=0))
+                st.plotly_chart(fig_np, use_container_width=True)
+                st.caption(
+                    "Baseado no campo 'isNew' do Clinicorp. "
+                    "Verifique se o sistema está registrando corretamente os primeiros atendimentos."
+                )
