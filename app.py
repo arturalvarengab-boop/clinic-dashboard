@@ -216,15 +216,11 @@ fat = sum(float(e.get("Amount") or 0) for e in fat_approved)
 total_evals_mes = len(estimates_mes)
 approved_evals_mes = len(fat_approved)
 
-# Recebido dos orçamentos aprovados (PaymentAccounted = "X" nas procedures)
-recebido_fat = 0.0
-for e in fat_approved:
-    for proc in e.get("ProcedureList", []):
-        if proc.get("PaymentAccounted") == "X":
-            recebido_fat += float(proc.get("FinalAmount") or proc.get("Amount") or 0)
+# Recebido no mês = caixa real recebido (do list_cash_flow)
+recebido_fat = recebido
 
-# A receber = aprovado - recebido
-a_receber = fat - recebido_fat
+# A receber = aprovado - recebido (mínimo 0)
+a_receber = max(0.0, fat - recebido_fat)
 
 ticket = fat / approved_evals_mes if approved_evals_mes else 0.0
 pct = (fat / meta * 100) if meta else 0.0
@@ -258,7 +254,7 @@ with page_overview:
     # KPI Cards
     c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("💰 Orçamentos Aprovados", fmt_brl(fat))
-    c2.metric("🏦 Recebido dos Orçamentos", fmt_brl(recebido_fat))
+    c2.metric("🏦 Recebido no Mês", fmt_brl(recebido_fat))
     c3.metric("🎯 Meta do Mês", fmt_brl(meta))
     c4.metric("👥 Atendimentos", f"{appts:,}")
     c5.metric("🎟️ Ticket Médio", fmt_brl(ticket))
@@ -307,12 +303,12 @@ with page_overview:
     col_bar, col_proj = st.columns([5, 1])
     with col_bar:
         icon = "🟢" if pct >= 100 else ("🟡" if pct >= 70 else "🔴")
-        if rev >= meta:
-            st.markdown(f"**{icon} Meta atingida! {pct:.1f}% — superou em {fmt_brl(rev - meta)}**")
+        if fat >= meta:
+            st.markdown(f"**{icon} Meta atingida! {pct:.1f}% — superou em {fmt_brl(fat - meta)}**")
         else:
             st.markdown(
                 f"**{icon} Meta: {pct:.1f}% atingido**"
-                f" — faltam **{fmt_brl(meta - rev)}** para bater"
+                f" — faltam **{fmt_brl(meta - fat)}** para bater"
             )
         st.progress(min(pct / 100, 1.0))
     with col_proj:
