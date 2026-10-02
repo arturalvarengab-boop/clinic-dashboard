@@ -588,6 +588,69 @@ if faltas == 0 and appts > 0 and not appt_info.get("field_names_found", {}).get(
         "para ver os campos reais da API e ajustar a detecção."
     )
 
+# ── Evolução da Meta ────────────────────────────────────────────────────────────
+st.markdown("### 📈 Evolução da Meta")
+
+_first_ref = date(today.year, today.month, 1)
+_all_days  = pd.date_range(from_d, to_d, freq="D")
+_n_days    = len(_all_days)
+
+if fat_approved:
+    _df = pd.DataFrame(fat_approved)
+    # Tenta detectar coluna de data
+    _date_col = None
+    for _c in ("SearchDate", "Date", "date", "DataAprovacao", "CreatedAt", "created_at"):
+        if _c in _df.columns:
+            _date_col = _c
+            break
+    if _date_col:
+        _df["_d"] = pd.to_datetime(_df[_date_col], errors="coerce").dt.date
+        _df["Amount"] = pd.to_numeric(_df["Amount"], errors="coerce").fillna(0)
+        _daily = _df.groupby("_d")["Amount"].sum()
+        _cum, _actuals = 0.0, []
+        for _day in _all_days:
+            _cum += float(_daily.get(_day.date(), 0))
+            _actuals.append(_cum)
+    else:
+        # Distribui linearmente se não achar coluna de data
+        _actuals = [fat * (i / _n_days) for i in range(1, _n_days + 1)]
+else:
+    _actuals = [0.0] * _n_days
+
+# Linha de meta acumulada pro-rata
+_targets = [(meta / _n_days) * i for i in range(1, _n_days + 1)]
+
+_fig_meta = go.Figure()
+_fig_meta.add_trace(go.Scatter(
+    x=[d.date() for d in _all_days], y=_targets,
+    name="Meta", mode="lines",
+    line=dict(color="#FF6B6B", width=2, dash="dash"),
+))
+_fig_meta.add_trace(go.Scatter(
+    x=[d.date() for d in _all_days], y=_actuals,
+    name="Faturamento Real", mode="lines+markers",
+    line=dict(color="#2E86AB", width=2.5),
+    marker=dict(size=5),
+    fill="tozeroy", fillcolor="rgba(46,134,171,0.12)",
+))
+# Linha da meta total
+_fig_meta.add_hline(
+    y=meta, line_dash="dot", line_color="rgba(255,107,107,0.4)",
+    annotation_text=f"Meta total: {fmt_brl(meta)}",
+    annotation_position="top left",
+)
+_fig_meta.update_layout(
+    height=300,
+    margin=dict(l=0, r=0, t=10, b=0),
+    hovermode="x unified",
+    legend=dict(orientation="h", y=1.12, x=0),
+    yaxis=dict(tickprefix="R$ ", tickformat=",.0f"),
+    xaxis=dict(tickformat="%d/%m"),
+    plot_bgcolor="rgba(0,0,0,0)",
+    paper_bgcolor="rgba(0,0,0,0)",
+)
+st.plotly_chart(_fig_meta, use_container_width=True)
+
 st.divider()
 
 # ── ABAS PRINCIPAIS ──────────────────────────────────────────────────────────────
