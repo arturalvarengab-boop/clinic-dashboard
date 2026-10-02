@@ -406,6 +406,95 @@ if period_type == "Mês atual":
     period_label += f" | Dia {today.day} de {dim_ref} | {dim_ref - today.day} dias restantes"
 st.markdown(f"**{period_label}**")
 
+# ── PAINEL HERO — métricas principais ────────────────────────────────────────────
+st.markdown("""
+<style>
+div[data-testid="metric-container"] {
+    background: #1a1f2e;
+    border: 1px solid #2d3548;
+    border-radius: 12px;
+    padding: 16px 20px;
+}
+div[data-testid="metric-container"] label {
+    font-size: 0.78rem !important;
+    color: #8b92a5 !important;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+div[data-testid="metric-container"] [data-testid="stMetricValue"] {
+    font-size: 1.9rem !important;
+    font-weight: 700 !important;
+    color: #ffffff !important;
+}
+div[data-testid="metric-container"] [data-testid="stMetricDelta"] {
+    font-size: 0.78rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("### Indicadores do Período")
+
+h1, h2, h3, h4 = st.columns(4)
+
+# Ícone de tendência para conversão
+conv_icon = "🟢" if conv_rate >= 70 else ("🟡" if conv_rate >= 50 else "🔴")
+h1.metric(
+    "📈 Taxa de Conversão",
+    f"{conv_rate:.1f}%",
+    delta=delta_pct(conv_rate, conv_rate_prev),
+    help="Avaliações aprovadas ÷ total de avaliações",
+)
+h2.metric(
+    "🎟️ Ticket Médio",
+    fmt_brl(ticket),
+    delta=delta_color(ticket, ticket_prev),
+    help="Valor médio por orçamento aprovado",
+)
+h3.metric(
+    "👥 Pacientes no Período",
+    f"{pacientes:,}" if pacientes else "—",
+    delta=delta_int(pacientes, pacientes_prev) if pacientes else None,
+    help="Pacientes únicos com agendamento no período",
+)
+h4.metric(
+    "📋 Avaliações Realizadas",
+    f"{total_evals:,}",
+    delta=delta_int(total_evals, total_evals_prev),
+    help="Total de orçamentos emitidos",
+)
+
+st.markdown("")
+
+h5, h6, h7, h8 = st.columns(4)
+
+h5.metric(
+    "⏳ Oportunidades Abertas",
+    f"{len(pending_evals):,}",
+    delta=fmt_brl(pending_amount),
+    help="Orçamentos ainda não aprovados nem recusados",
+)
+h6.metric(
+    "⚠️ Faltas no Período",
+    f"{faltas:,}" if faltas or appts else "—",
+    delta=delta_int(faltas, faltas_prev) if faltas else None,
+    delta_color="inverse" if faltas > faltas_prev else "off",
+    help="Agendamentos com status de ausência",
+)
+h7.metric(
+    "🆕 Primeiras Consultas",
+    f"{primeiras:,}" if primeiras else "—",
+    delta=delta_int(primeiras, primeiras_prev) if primeiras else None,
+    help="Agendamentos de primeira vez / avaliação inicial",
+)
+h8.metric(
+    "🎯 Meta Atingida",
+    f"{pct_meta:.1f}%",
+    delta=fmt_brl(fat - meta),
+    delta_color="normal" if fat >= meta else "inverse",
+    help=f"Meta: {fmt_brl(meta)}",
+)
+
+st.divider()
 
 # ── ABAS PRINCIPAIS ──────────────────────────────────────────────────────────────
 page_overview, page_opp, page_prof, page_price, page_prev = st.tabs([
