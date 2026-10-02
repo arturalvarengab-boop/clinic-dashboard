@@ -115,6 +115,7 @@ def classify_appts(appts_list: list) -> dict:
     absences = 0
     first_consults = 0
     unique_patients = set()
+    first_consult_patient_ids = set()
     raw_statuses = set()
     raw_types = set()
     field_names_found = {}
@@ -204,11 +205,22 @@ def classify_appts(appts_list: list) -> dict:
             raw_types.add(type_val)
             if any(kw in type_val for kw in FIRST_CONSULT_KEYWORDS):
                 first_consults += 1
+                # Rastreia ID do paciente desta primeira consulta
+                for k in PATIENT_ID_FIELDS:
+                    if k in appt and appt[k]:
+                        first_consult_patient_ids.add(str(appt[k]))
+                        break
+                else:
+                    for k, v in appt.items():
+                        if ("paciente" in k.lower() or "client" in k.lower() or "patient" in k.lower()) and v:
+                            first_consult_patient_ids.add(f"{k}:{v}")
+                            break
 
     return {
         "absences": absences,
         "first_consults": first_consults,
         "unique_patients": len(unique_patients),
+        "first_consult_patient_ids": first_consult_patient_ids,
         "raw_statuses": raw_statuses,
         "raw_types": raw_types,
         "field_names_found": field_names_found,
@@ -234,6 +246,50 @@ def count_patients_from_estimates(estimates_list: list) -> int:
                     ids.add(f"{k}:{v}")
                     break
     return len(ids)
+
+
+def analyze_followup(appts_list: list, first_consult_ids: set) -> dict:
+    """
+    Cruza pacientes de primeira consulta com o restante dos agendamentos.
+    Retorna quantos tiveram follow-up (2ª consulta agendada/realizada).
+    """
+    if not first_consult_ids:
+        return {"available": False, "reason": "Primeiras consultas não identificadas (campo de tipo não encontrado)"}
+
+    PATIENT_ID_FIELDS = (
+        "PatientId", "clientId", "PacienteId", "patient_id", "patientId",
+        "ClientId", "paciente_id", "idPaciente", "idCliente", "pacienteId",
+    )
+
+    # Conta quantos agendamentos cada paciente teve no período
+    patient_appt_count: dict = {}
+    for appt in appts_list:
+        pid = None
+        for k in PATIENT_ID_FIELDS:
+            if k in appt and appt[k]:
+                pid = str(appt[k])
+                break
+        else:
+            for k, v in appt.items():
+                if ("paciente" in k.lower() or "client" in k.lower() or "patient" in k.lower()) and v:
+                    pid = f"{k}:{v}"
+                    break
+        if pid:
+            patient_appt_count[pid] = patient_appt_count.get(pid, 0) + 1
+
+    # Pacientes de 1ª consulta que também têm outro agendamento = fizeram follow-up
+    with_followup    = {pid for pid in first_consult_ids if patient_appt_count.get(pid, 0) > 1}
+    without_followup = first_consult_ids - with_followup
+    followup_rate    = (len(with_followup) / len(first_consult_ids) * 100) if first_consult_ids else 0.0
+
+    return {
+        "available": True,
+        "total_first_consult": len(first_consult_ids),
+        "with_followup": len(with_followup),
+        "without_followup": len(without_followup),
+        "followup_rate": followup_rate,
+        "without_followup_ids": without_followup,   # para tabela futura
+    }
 
 
 # ── API ─────────────────────────────────────────────────────────────────────────
@@ -432,6 +488,8 @@ faltas = appt_info["absences"]
 primeiras = appt_info["first_consults"]
 # Pacientes: tenta via agendamentos; se não encontrar, usa orçamentos como fallback
 pacientes = appt_info["unique_patients"] or count_patients_from_estimates(estimates_list)
+# Follow-up: cruza IDs de primeiras consultas com demais agendamentos
+followup_stats = analyze_followup(appts_list, appt_info.get("first_consult_patient_ids", set()))
 
 elapsed = (to_d - from_d).days + 1
 dim_ref = calendar.monthrange(today.year, today.month)[1]
@@ -1013,6 +1071,66 @@ with page_opp:
         st.success("Nenhuma falta detectada no período. Ative o modo debug para verificar os campos de status.")
     else:
         st.info("Ative o modo debug para verificar se o campo de status de faltas está disponível na API.")
+
+    # ── Análise: Primeira Consulta → Follow-up ─────────────────────────────────
+    st.divider()
+    st.subheader("🔄 Primeira Consulta → Follow-up")
+
+    if not followup_stats.get("available"):
+        st.info(
+            f"**{primeiras} primeira(s) consulta(s)** identificada(s) no período. "
+            "A análise de follow-up requer que o campo de **tipo de agendamento** "
+            "seja detectado na API. Ative o **Modo debug** para ver os campos disponíveis."
+        )
+        if primeiras > 0:
+            st.caption(
+                "Dica: o campo de tipo pode se chamar `Type`, `TipoConsulta`, `AppointmentType` "
+                "ou similar. Compartilhe o output do debug para ajuste."
+            )
+    else:
+        total_fc  = followup_stats["total_first_consult"]
+        com_fu    = followup_stats["with_followup"]
+        sem_fu    = followup_stats["without_followup"]
+        taxa_fu   = followup_stats["followup_rate"]
+
+        fu1, fu2, fu3, fu4 = st.columns(4)
+        fu1.metric("🆕 Primeiras Consultas", f"{total_fc:,}")
+        fu2.metric("✅ Fizeram Follow-up", f"{com_fu:,}",
+                   help="Paciente da 1ª consulta que voltou ou tem retorno agendado no período")
+        fu3.metric("⏳ Sem Follow-up", f"{sem_fu:,}",
+                   delta=f"Oportunidade: {fmt_brl(sem_fu * ticket)}" if ticket else None,
+                   delta_color="off",
+                   help="Pacientes que vieram uma vez e não retornaram no período")
+        fu4.metric("📈 Taxa de Follow-up", fmt_pct(taxa_fu),
+                   delta_color="normal" if taxa_fu >= 60 else "inverse")
+
+        # Funil visual
+        if total_fc > 0:
+            fig_fu = go.Figure(go.Funnel(
+                y=["Primeiras Consultas", "Com Follow-up"],
+                x=[total_fc, com_fu],
+                textinfo="value+percent initial",
+                marker=dict(color=["#2E86AB", "#4CAF50"]),
+            ))
+            fig_fu.update_layout(height=220, margin=dict(l=0, r=0, t=10, b=0))
+            st.plotly_chart(fig_fu, use_container_width=True)
+
+        # Alerta e orientação
+        if sem_fu > 0:
+            receita_potencial = sem_fu * ticket
+            st.warning(
+                f"**{sem_fu} paciente(s)** vieram pela primeira vez e ainda não retornaram. "
+                f"Receita potencial em aberto: **{fmt_brl(receita_potencial)}**. "
+                "Recomenda-se contato de follow-up ativo."
+            )
+        elif total_fc > 0:
+            st.success(f"Todos os {total_fc} pacientes de primeira consulta já fizeram follow-up!")
+
+        st.caption(
+            "ℹ️ Follow-up = paciente que teve uma 1ª consulta e possui pelo menos mais um "
+            "agendamento no mesmo período. Para rastrear retornos fora do período atual, "
+            "amplie o filtro de datas na sidebar."
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
