@@ -110,56 +110,130 @@ def save_pricing(procedures: list, history: list):
 def classify_appts(appts_list: list) -> dict:
     """
     Percorre appointments e detecta campos com múltiplos nomes possíveis.
-    Retorna dict com: absences, first_consults, unique_patients, field_names
+    Retorna dict com: absences, first_consults, unique_patients, raw_statuses, field_names
     """
     absences = 0
     first_consults = 0
     unique_patients = set()
+    raw_statuses = set()
+    raw_types = set()
     field_names_found = {}
 
-    ABSENT_KEYWORDS = {"absent", "faltou", "missed", "no_show", "ausente", "falta", "nao_compareceu"}
-    FIRST_CONSULT_KEYWORDS = {"primeira", "first", "avaliacao", "novo", "inicial", "avaliação",
-                              "new_patient", "primeiro_atendimento", "consulta_inicial"}
+    # Palavras que indicam falta / não comparecimento / cancelamento pelo paciente
+    ABSENT_KEYWORDS = {
+        "absent", "faltou", "missed", "no_show", "ausente", "falta",
+        "nao_compareceu", "nao_confirmou", "naorealizou", "nao_realizado",
+        "desmarcou", "remarcou", "adiou", "nao_atendido", "paciente_faltou",
+        "nao_veio", "nao_apareceu", "nf", "f",
+    }
+    FIRST_CONSULT_KEYWORDS = {
+        "primeira", "first", "avaliacao", "novo", "inicial", "avaliação",
+        "new_patient", "primeiro_atendimento", "consulta_inicial", "prime",
+        "1a_consulta", "1consulta", "new", "triagem", "acolhimento",
+    }
+    # Campos candidatos a ID de paciente
+    PATIENT_ID_FIELDS = (
+        "PatientId", "clientId", "PacienteId", "patient_id", "patientId",
+        "ClientId", "paciente_id", "idPaciente", "idCliente", "id_paciente",
+        "id_cliente", "IdPaciente", "IdCliente", "pacienteId",
+    )
+    # Campos candidatos a status
+    STATUS_FIELDS = (
+        "Status", "status", "StatusNome", "AppointmentStatus", "situacao",
+        "Situacao", "StatusName", "statusName", "appointment_status",
+        "StatusConsulta", "SituacaoConsulta", "estado", "Estado",
+    )
+    # Campos candidatos a tipo
+    TYPE_FIELDS = (
+        "Type", "type", "AppointmentType", "TipoConsulta", "tipo",
+        "ConsultType", "TypeName", "typeName", "ProcedureType",
+        "TipoAgendamento", "tipoConsulta", "appointment_type",
+    )
 
     for appt in appts_list:
-        # Detect patient field
-        for k in ("PatientId", "clientId", "PacienteId", "patient_id", "patientId",
-                  "ClientId", "paciente_id"):
+        # ── Detectar paciente ──────────────────────────────────────────────────
+        for k in PATIENT_ID_FIELDS:
             if k in appt and appt[k]:
                 unique_patients.add(str(appt[k]))
                 field_names_found["patient_field"] = k
                 break
+        else:
+            # Fallback: procurar qualquer campo terminando em "id" com valor numérico
+            for k, v in appt.items():
+                kl = k.lower()
+                if ("paciente" in kl or "client" in kl or "patient" in kl) and v:
+                    unique_patients.add(f"{k}:{v}")
+                    field_names_found.setdefault("patient_field_fallback", k)
+                    break
 
-        # Detect and check status/absence
+        # ── Detectar status / falta ────────────────────────────────────────────
         status_val = None
-        for k in ("Status", "status", "StatusNome", "AppointmentStatus", "situacao",
-                  "Situacao", "StatusName"):
-            if k in appt:
-                status_val = str(appt[k] or "").upper().replace(" ", "_")
+        for k in STATUS_FIELDS:
+            if k in appt and appt[k] is not None:
+                status_val = str(appt[k]).strip().upper().replace(" ", "_")
                 field_names_found["status_field"] = k
                 break
+        else:
+            # Fallback: procurar qualquer campo com "status" ou "situacao" no nome
+            for k, v in appt.items():
+                if ("status" in k.lower() or "situac" in k.lower()) and v:
+                    status_val = str(v).strip().upper().replace(" ", "_")
+                    field_names_found.setdefault("status_field_fallback", k)
+                    break
 
-        if status_val and any(kw in status_val for kw in ABSENT_KEYWORDS):
-            absences += 1
+        if status_val:
+            raw_statuses.add(status_val)
+            if any(kw in status_val for kw in ABSENT_KEYWORDS):
+                absences += 1
 
-        # Detect and check type/first consult
+        # ── Detectar tipo / primeira consulta ──────────────────────────────────
         type_val = None
-        for k in ("Type", "type", "AppointmentType", "TipoConsulta", "tipo",
-                  "ConsultType", "TypeName", "ProcedureType"):
-            if k in appt:
-                type_val = str(appt[k] or "").upper().replace(" ", "_")
+        for k in TYPE_FIELDS:
+            if k in appt and appt[k] is not None:
+                type_val = str(appt[k]).strip().upper().replace(" ", "_")
                 field_names_found["type_field"] = k
                 break
+        else:
+            for k, v in appt.items():
+                if ("tipo" in k.lower() or "type" in k.lower()) and v:
+                    type_val = str(v).strip().upper().replace(" ", "_")
+                    field_names_found.setdefault("type_field_fallback", k)
+                    break
 
-        if type_val and any(kw in type_val for kw in FIRST_CONSULT_KEYWORDS):
-            first_consults += 1
+        if type_val:
+            raw_types.add(type_val)
+            if any(kw in type_val for kw in FIRST_CONSULT_KEYWORDS):
+                first_consults += 1
 
     return {
         "absences": absences,
         "first_consults": first_consults,
         "unique_patients": len(unique_patients),
+        "raw_statuses": raw_statuses,
+        "raw_types": raw_types,
         "field_names_found": field_names_found,
     }
+
+
+def count_patients_from_estimates(estimates_list: list) -> int:
+    """Conta pacientes únicos a partir dos orçamentos (fallback confiável)."""
+    ids = set()
+    FIELDS = (
+        "PatientId", "clientId", "PacienteId", "patient_id", "patientId",
+        "ClientId", "paciente_id", "idPaciente", "idCliente", "pacienteId",
+    )
+    for e in estimates_list:
+        for k in FIELDS:
+            if k in e and e[k]:
+                ids.add(str(e[k]))
+                break
+        else:
+            # Fallback: qualquer campo com "paciente" ou "client" no nome
+            for k, v in e.items():
+                if ("paciente" in k.lower() or "client" in k.lower()) and v:
+                    ids.add(f"{k}:{v}")
+                    break
+    return len(ids)
 
 
 # ── API ─────────────────────────────────────────────────────────────────────────
@@ -356,7 +430,8 @@ ticket = fat / approved_evals if approved_evals else 0.0
 conv_rate = (approved_evals / total_evals * 100) if total_evals else 0.0
 faltas = appt_info["absences"]
 primeiras = appt_info["first_consults"]
-pacientes = appt_info["unique_patients"]
+# Pacientes: tenta via agendamentos; se não encontrar, usa orçamentos como fallback
+pacientes = appt_info["unique_patients"] or count_patients_from_estimates(estimates_list)
 
 elapsed = (to_d - from_d).days + 1
 dim_ref = calendar.monthrange(today.year, today.month)[1]
@@ -379,7 +454,7 @@ conv_rate_prev = (approved_evals_prev / total_evals_prev * 100) if total_evals_p
 appt_info_prev = classify_appts(appts_prev)
 faltas_prev = appt_info_prev["absences"]
 primeiras_prev = appt_info_prev["first_consults"]
-pacientes_prev = appt_info_prev["unique_patients"]
+pacientes_prev = appt_info_prev["unique_patients"] or count_patients_from_estimates(estimates_prev)
 a_receber_prev = max(0.0, fat_prev - recebido_prev)
 
 pct_meta = (fat / meta * 100) if meta else 0.0
@@ -390,13 +465,16 @@ if debug_mode:
         st.write(f"**business_id:** `{bid}` | **business_name:** `{bname}`")
         st.write(f"**Período atual:** {from_d} → {to_d} | **Anterior:** {prev_from} → {prev_to}")
         st.write(f"**Faturamento:** `{fat}` | **Recebido:** `{recebido}` | **Atendimentos:** `{appts}`")
-        st.write(f"**Avaliações:** `{total_evals}` | **Aprovadas:** `{approved_evals}` | **Pendentes:** `{len(pending_evals)}`")
-        st.write(f"**classify_appts campos encontrados:** `{appt_info['field_names_found']}`")
+        st.write(f"**Avaliações (orçamentos):** `{total_evals}` | **Aprovadas:** `{approved_evals}` | **Pendentes:** `{len(pending_evals)}`")
+        st.write(f"**Campos detectados:** `{appt_info['field_names_found']}`")
         st.write(f"**Faltas detectadas:** `{faltas}` | **Primeiras consultas:** `{primeiras}` | **Pacientes únicos:** `{pacientes}`")
+        st.write(f"**Status únicos encontrados nos agendamentos:** `{appt_info.get('raw_statuses', set())}`")
+        st.write(f"**Tipos únicos encontrados nos agendamentos:** `{appt_info.get('raw_types', set())}`")
         if appts_list:
-            st.write("**Campos da primeira consulta:**", list(appts_list[0].keys()))
+            st.write("**Campos de um agendamento:**", list(appts_list[0].keys()))
+            st.write("**Exemplo de agendamento:**", appts_list[0])
         if estimates_list:
-            st.write("**Campos do primeiro orçamento:**", list(estimates_list[0].keys()))
+            st.write("**Campos de um orçamento:**", list(estimates_list[0].keys()))
 
 
 # ── HEADER ──────────────────────────────────────────────────────────────────────
@@ -434,65 +512,81 @@ div[data-testid="metric-container"] [data-testid="stMetricDelta"] {
 
 st.markdown("### Indicadores do Período")
 
+# ── Linha 1: Atendimentos & Pacientes ─────────────────────────────────────────
 h1, h2, h3, h4 = st.columns(4)
 
-# Ícone de tendência para conversão
-conv_icon = "🟢" if conv_rate >= 70 else ("🟡" if conv_rate >= 50 else "🔴")
 h1.metric(
+    "📅 Total Atendimentos",
+    f"{appts:,}",
+    delta=delta_int(appts, appts_cnt_prev),
+    help="Total de agendamentos no período (não deletados)",
+)
+h2.metric(
+    "👥 Pacientes Únicos",
+    f"{pacientes:,}" if pacientes else "—",
+    delta=delta_int(pacientes, pacientes_prev) if pacientes else None,
+    help="Pacientes distintos com agendamento no período",
+)
+h3.metric(
+    "⚠️ Faltas",
+    f"{faltas:,}" if (faltas or appts) else "—",
+    delta=delta_int(faltas, faltas_prev) if faltas else None,
+    delta_color="inverse" if faltas > faltas_prev else "off",
+    help="Pacientes que não compareceram, não confirmaram ou adiaram",
+)
+h4.metric(
+    "🆕 Primeiras Consultas",
+    f"{primeiras:,}" if primeiras else "—",
+    delta=delta_int(primeiras, primeiras_prev) if primeiras else None,
+    help="Pacientes novos que vieram pela primeira vez",
+)
+
+st.markdown("")
+
+# ── Linha 2: Financeiro & Conversão ───────────────────────────────────────────
+h5, h6, h7, h8 = st.columns(4)
+
+h5.metric(
+    "📋 Avaliações no Mês",
+    f"{total_evals:,}",
+    delta=delta_int(total_evals, total_evals_prev),
+    help="Orçamentos únicos gerados no período (avaliações realizadas)",
+)
+h6.metric(
     "📈 Taxa de Conversão",
     f"{conv_rate:.1f}%",
     delta=delta_pct(conv_rate, conv_rate_prev),
-    help="Avaliações aprovadas ÷ total de avaliações",
+    help="Orçamentos aprovados ÷ orçamentos gerados no período",
 )
-h2.metric(
+h7.metric(
     "🎟️ Ticket Médio",
     fmt_brl(ticket),
     delta=delta_color(ticket, ticket_prev),
     help="Valor médio por orçamento aprovado",
 )
-h3.metric(
-    "👥 Pacientes no Período",
-    f"{pacientes:,}" if pacientes else "—",
-    delta=delta_int(pacientes, pacientes_prev) if pacientes else None,
-    help="Pacientes únicos com agendamento no período",
-)
-h4.metric(
-    "📋 Avaliações Realizadas",
-    f"{total_evals:,}",
-    delta=delta_int(total_evals, total_evals_prev),
-    help="Total de orçamentos emitidos",
-)
-
-st.markdown("")
-
-h5, h6, h7, h8 = st.columns(4)
-
-h5.metric(
+h8.metric(
     "⏳ Oportunidades Abertas",
     f"{len(pending_evals):,}",
     delta=fmt_brl(pending_amount),
-    help="Orçamentos ainda não aprovados nem recusados",
+    help="Orçamentos gerados e ainda não aprovados (potencial de receita)",
 )
-h6.metric(
-    "⚠️ Faltas no Período",
-    f"{faltas:,}" if faltas or appts else "—",
-    delta=delta_int(faltas, faltas_prev) if faltas else None,
-    delta_color="inverse" if faltas > faltas_prev else "off",
-    help="Agendamentos com status de ausência",
+
+# Barra de progresso da meta compacta
+st.markdown("")
+icon_meta = "🟢" if pct_meta >= 100 else ("🟡" if pct_meta >= 70 else "🔴")
+st.markdown(
+    f"{icon_meta} **Meta:** {fmt_brl(fat)} / {fmt_brl(meta)} &nbsp;·&nbsp; "
+    f"**{pct_meta:.1f}%** atingido &nbsp;·&nbsp; "
+    f"{'Superou em ' + fmt_brl(fat - meta) if fat >= meta else 'Faltam ' + fmt_brl(meta - fat)}"
 )
-h7.metric(
-    "🆕 Primeiras Consultas",
-    f"{primeiras:,}" if primeiras else "—",
-    delta=delta_int(primeiras, primeiras_prev) if primeiras else None,
-    help="Agendamentos de primeira vez / avaliação inicial",
-)
-h8.metric(
-    "🎯 Meta Atingida",
-    f"{pct_meta:.1f}%",
-    delta=fmt_brl(fat - meta),
-    delta_color="normal" if fat >= meta else "inverse",
-    help=f"Meta: {fmt_brl(meta)}",
-)
+st.progress(min(pct_meta / 100, 1.0))
+
+if faltas == 0 and appts > 0 and not appt_info.get("field_names_found", {}).get("status_field"):
+    st.caption(
+        "ℹ️ **Faltas** e **Primeiras Consultas** mostram `—` porque o campo de status "
+        "dos agendamentos ainda não foi identificado. Ative o **Modo debug** na sidebar "
+        "para ver os campos reais da API e ajustar a detecção."
+    )
 
 st.divider()
 
